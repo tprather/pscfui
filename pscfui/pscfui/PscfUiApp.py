@@ -9,16 +9,22 @@ kivy.require('1.9.1')
 
 from kivy.app             import App
 from kivy.lang            import Builder
+from kivy.properties      import StringProperty
 from kivy.uix.button      import Button
 from kivy.uix.boxlayout   import BoxLayout
-'from kivy.uix.filechooser import FileChooserIconView'
+from kivy.uix.gridlayout  import GridLayout
 from kivy.uix.label       import Label
 from kivy.uix.modalview   import ModalView
+from kivy.uix.scrollview  import ScrollView
 'from kivy.uix.popup       import Popup'
 from kivy.utils           import platform
 from os.path              import sep, expanduser, isdir, dirname
 
+import io
+import os
 import subprocess
+import sys
+import threading
 
 from pscfui               import FileBrowser
 
@@ -57,70 +63,145 @@ Builder.load_string('''
 <Button>:
     size: self.texture_size
 
+<ScrollableLabel>:
+    Label:
+        size_hint_y: None
+        height:      self.texture_size[1]
+        text_size:   self.width, None
+        text:        root.text
+
 ''')
 
+#==================================================================================================
+def find_child_by_id(widget,idval):
+    for w in widget.walk():
+        if (w.id == idval):
+            return w
+    return None
+    
+#==================================================================================================
 class FileSelectModalView(ModalView):
     
-    selectedFile = ''
+    m_selected_file = ''
 
     def __init__(self, **kwargs):
         super(FileSelectModalView,self).__init__(**kwargs)
+
+        #-----Determine users document path to add to file selection "Favorites"-------------------
         if platform == 'win':
-            user_path = dirname(expanduser('~')) + sep + 'Documents'
+            user_path = os.path.expanduser('~') + sep + 'Documents'
         else:
-            user_path = expanduser('~') + sep + 'Documents'
-        fileBrowser = FileBrowser.FileBrowser(
+            user_path = os.path.expanduser('~')
+
+        #-----Create a FileBrowser instance with suggested "Favorites" directories-----------------
+        file_browser = FileBrowser.FileBrowser(
             select_string='Select',
             favorites=[
-                (user_path                                           , 'Documents'),
-                (user_path+"Projects"+sep+"DMREF"+sep+"pscf_examples", 'Examples' )
+                (user_path                                               , 'Documents'),
+                (user_path+sep+'Projects'+sep+'DMREF'+sep+'pscf-examples', 'Examples' )
             ]
         )
-        fileBrowser.bind(on_success=self.note_file)
-        self.add_widget(fileBrowser)
+        file_browser.bind(on_success=self.note_file)
+        self.add_widget(file_browser)
 
     def note_file(self,instance):
+        #-----Note the selected file for external use---------------------------------------------- 
         try:
-            self.selectedFile = instance.selection[0]
+            self.m_selected_file = instance.selection[0]
         except:
             pass
         self.dismiss()
     
+#==================================================================================================
+class ScrollableLabel(ScrollView):
+    text = StringProperty('')
+    
+    def __init__(self,**kwargs):
+        super(ScrollableLabel,self).__init__(**kwargs)
+        self.bar_inactive_color = [.7,.7,.7,.9]
+    
+    def append_text(self,t):
+        self.text += t
+        self.scroll_y = 0
+
+'''        
+class ScrollableTextBox(ScrollView):
+    
+    m_text_label = None
+    
+    def __init__(self,**kwargs):
+        super(ScrollableTextBox,self).__init__(size_hint_y=None,**kwargs)
+        layout = BoxLayout(size_hint_y=None)
+        #layout.bind(minimum_height=layout.setter('height'))
+        self.m_text_label = Label(size_hint_y=None)
+        layout.add_widget(self.m_text_label)
+        self.add_widget(layout)
+        
+    def append_text(self,t):
+        self.m_text_label.text += t;
+'''
+    
+#==================================================================================================
 class PscfUi(BoxLayout):
 
-    fsDialog  = FileSelectModalView()
-    inputFile = Label()
+    #.....Internal Instance Members................................................................
+    __m_fs_dialog   = FileSelectModalView()
+    __m_input_file  = None
+    __m_output_text = None
     
-    def __init__(self, **kwargs):
+    def __init__(self,**kwargs):
         super(PscfUi,self).__init__(orientation='vertical',**kwargs)
-        self.fsDialog.bind(on_dismiss=self.note_input_file)
-        bSelect = Button(text="Select Input File")
-        bSelect.bind(on_press=self.fsDialog.open)
-        fsBox = BoxLayout(orientation='horizontal',height=100)
-        fsBox.add_widget(bSelect)
-        fsBox.add_widget(self.inputFile)
-        self.add_widget(fsBox)
-        bProcess = Button(text="Execute")
-        bProcess.bind(on_press=self.process_input_file)
-        self.add_widget(bProcess)
-        self.inputFile = 'C:\\Users\\tprather\\Documents\\Projects\\DMREF\\pscf-examples\\diblock\\bcc\\iterate\\param'
+        #-----When file select completes, note the input file selected-----------------------------
+        self.__m_fs_dialog.bind(on_dismiss=self.note_input_file)
+
+        #-----UI Row 1: Selected input file and button for dialog to select it.--------------------
+        fs_box = BoxLayout(orientation='horizontal',height=50,size_hint=(1.0,None))
+        fs_box.add_widget(Button(text='Select Input File',size_hint=(0.2,1.0),on_press=self.__m_fs_dialog.open))
+        fs_box.add_widget(Label (id='input_file'         ,size_hint=(0.8,1.0)))
+        self.add_widget(fs_box)
+
+        #-----UI Row 2: Button to call pscf with input file and capture output---------------------
+        ex_box = BoxLayout(orientation='horizontal',height=50,size_hint=(1.0,None))
+        ex_box.add_widget(Button(text='Execute',size_hint=(1.0,1.0),on_press=self.process_input_file))
+        self.add_widget(ex_box)
+
+        #-----UI Row 3: Scrolling view of pscf output----------------------------------------------
+        #self.add_widget(ScrollableTextBox(id='output_text',size_hint=(1.0,1.0),scroll_type=['bars']))
+        self.add_widget(ScrollableLabel(id='output_text',scroll_type=['bars'],bar_width=10))
+        
+        #-----Note references to important widgets-------------------------------------------------
+        self.__m_input_file  = find_child_by_id(self,'input_file')
+        self.__m_output_text = find_child_by_id(self,'output_text')
+
+        #-----Temporary: default input file for easy testing---------------------------------------
+        self.__m_input_file.text = 'C:\\Users\\tprather\\Documents\\Projects\\DMREF\\pscf-examples\\diblock\\bcc\\iterate\\param'
 
     def note_input_file(self,*args):
-        self.inputFile.text = self.fsDialog.selectedFile;
-        print(self.inputFile.text)
+        #-----Note the selected input file---------------------------------------------------------
+        self.__m_input_file.text = self.__m_fs_dialog.m_selected_file;
+    
+    def pscf_thread(self,input_file,output_text):
+        #-----Execute pscf with the __m_input_file opened for stdin and capture stdout---------------
+        with io.open(input_file,'r') as ifile:
+            try:
+                # Assume that pscf/bin directory is in the path.
+                # poutput = subprocess.check_output(["C:\\Users\\tprather\\Documents\\Projects\\DMREF\\pscf\\bin\\pscf.exe"], stdin=param, stderr=subprocess.STDOUT)
+                p = subprocess.Popen(["pscf.exe"],cwd=os.path.dirname(input_file),stdin=ifile,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+                for c in iter(lambda: p.stdout.read(1),''):
+                    sys.stdout.write(c)
+                    output_text.append_text(c);
+            except subprocess.CalledProcessError, e:
+                print(e.output)
     
     def process_input_file(self,instance):
-        param = open(self.inputFile,'r')
-        try:
-            poutput = subprocess.check_output(["C:\\Users\\tprather\\Documents\\Projects\\DMREF\\pscf\\bin\\pscf.exe"], stdin=param, stderr=subprocess.STDOUT)
-        except subprocess.CalledProcessError, e:
-            poutput = e.output
-        print(poutput)
+        threading.Thread(target=self.pscf_thread,args=(self.__m_input_file.text,self.__m_output_text)).start()
         
+#==================================================================================================
 class PscfUiApp(App):
     
     def build(self):
         return PscfUi()
     
+#==================================================================================================
 if __name__ == '__main__':
     PscfUiApp().run()
